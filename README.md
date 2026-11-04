@@ -15,7 +15,7 @@ pip install -r requirements.txt
 
 ## Usage
 ```bash
-python -m pytest -q          # 8 tests, ~1.5 s
+python -m pytest -q          # 10 tests, ~2 s
 python run_demo.py           # end-to-end demo, ~1 s, writes demo_out/ (parquet, registry.json, online.db, summary.json)
 ```
 ```python
@@ -48,7 +48,8 @@ Semantics (the same in both stores, which is why there is no skew):
 - A feature row is visible at time t if `feature_ts <= t`. A value computed at t is known at t, so equal timestamps are visible. Anything later is the future and is never joined.
 - A feature row is fresh if `feature_ts >= t - ttl`. Otherwise the value is null rather than stale.
 - `(entity, event_timestamp)` must be unique per view. Both stores check this, and duplicates raise an error instead of returning an arbitrary value.
-- Timestamps are naive UTC.
+- Timestamps are naive UTC with microsecond precision. A timezone-aware source column is rejected with a clear error.
+- Entity ids may be Python or numpy scalars (numpy ints are converted, because SQLite would store them as BLOBs and match nothing).
 
 Tests:
 - **Leakage cases:**
@@ -61,21 +62,26 @@ Tests:
   - row order is kept.
 - **Oracle:** 300 random label times (50 of them exactly on feature timestamps) are joined and compared with a brute-force pandas implementation.
 - **Materialisation:** it picks the latest row; re-running is a no-op; an older run never moves values back; the TTL applies at read time.
-- **Skew:** synthetic demo data at 3 serving times (incl. exactly midnight, the TTL boundary). The test materialises incrementally (an earlier run first), then requires online == offline for 45 entities × 3 features, covering both fresh and null cases.
+- **Skew:**
+  - Synthetic demo data at 3 serving times. One of them is exactly midnight, where label time equals feature time.
+  - The test materialises incrementally (an earlier run first).
+  - It then requires online == offline for 45 entities × 3 features, covering both fresh and null cases.
+  - A fixture case checks online == offline exactly at the TTL boundary (a row exactly `ttl` old is still served).
+- **Feature job:** a user whose 7-day window is empty gets an explicit 0 row, not a gap. A gap would make both stores keep serving the last non-zero count as "fresh", a bug the skew test cannot catch because both stores read the same data.
 
 Choices: SQLite instead of Redis keeps the online store in the standard library, with no container to run. The registry is a JSON file. View and feature names must be identifiers, because they become SQL identifiers.
 
 ## Results (demo, seed 0)
 | metric | value |
 |---|---|
-| synthetic transactions → daily feature rows | 7495 → 5455 (200 users, 60 days) |
-| PIT training set | 2000 labelled rows, 1094 with fresh features, 0.044 s DuckDB join |
+| synthetic transactions → daily feature rows | 7495 → 6622 (200 users, 60 days) |
+| PIT training set | 2000 labelled rows, 1284 with fresh features, 0.057 s DuckDB join |
 | mismatches vs brute-force PIT oracle | **0** |
-| materialised entities | 198 (76 still fresh at serving time, ttl 3 days) |
-| online lookup, 200 entities | ~11 ms (SQLite, one IN query) |
+| materialised entities | 198 (110 still fresh at serving time, ttl 3 days) |
+| online lookup, 200 entities | ~9 ms (SQLite, one IN query) |
 | online vs offline skew mismatches | **0** |
 
-**Debugging note.** The first leakage audit in `run_demo.py` reported 213 leaking rows. It found each joined row's source by matching on feature values, but 874 feature rows share all their values with another day of the same user, because the 7-day window can be unchanged from one day to the next. So the audit itself was ambiguous. A brute-force oracle confirmed 0 mismatches, and it now replaces that audit in the demo and in a unit test.
+**Debugging note.** The first leakage audit in `run_demo.py` reported 213 leaking rows. It found each joined row's source by matching on feature values, but 874 feature rows share all their values with another day of the same user, because the 7-day window can be unchanged from one day to the next. So the audit itself was ambiguous. A brute-force oracle confirmed 0 mismatches, and it now replaces that audit in the demo and in a unit test. The self-review then found a real bug in the demo feature job: users with an empty window got no row, so stale counts were served as fresh. Fixed with explicit zero rows.
 
 ## Not done (time box)
 Streaming/push ingestion, on-demand transforms, created-timestamp tie-breaks, a Redis backend, an HTTP serving API, schema/dtype validation of sources.

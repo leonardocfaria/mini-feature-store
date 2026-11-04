@@ -13,6 +13,9 @@ def check_unique(con, view: FeatureView) -> None:
                       [view.source]).fetchone()[0]
     if dup:
         raise ValueError(f"{view.name}: {dup} duplicate ({view.entity}, {TS}) rows in {view.source}")
+    ts_type = con.execute(f"SELECT typeof({TS}) FROM read_parquet(?) LIMIT 1", [view.source]).fetchone()
+    if ts_type and ts_type[0] != "TIMESTAMP":
+        raise ValueError(f"{view.name}: {TS} must be a naive UTC timestamp, got {ts_type[0]}")
 
 
 def brute_force_pit(features: pd.DataFrame, entity: str, entity_df: pd.DataFrame, cols: list[str], ttl_days: float) -> pd.DataFrame:

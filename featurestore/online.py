@@ -40,11 +40,14 @@ class OnlineStore:
         entity = resolved[0][0].entity
         if any(v.entity != entity for v, _ in resolved):
             raise ValueError("all views in one lookup must share the entity key")
-        out = pd.DataFrame({entity: entity_ids})
+        ids = [i.item() if hasattr(i, "item") else i for i in entity_ids]  # numpy scalars would bind as BLOBs
+        out = pd.DataFrame({entity: ids})
+        if not ids:
+            return out.assign(**{f"{v.name}__{f}": pd.Series(dtype=float) for v, feats in resolved for f in feats})
         for v, feats in resolved:
-            marks = ", ".join("?" * len(entity_ids))
+            marks = ", ".join("?" * len(ids))
             got = pd.read_sql_query(f"SELECT {v.entity}, {TS}, {', '.join(feats)} FROM {v.name} WHERE {v.entity} IN ({marks})",
-                                    self.con, params=list(entity_ids))
+                                    self.con, params=ids)
             got[TS] = pd.to_datetime(got[TS])
             stale = got[TS] < now - pd.Timedelta(days=v.ttl_days)
             got.loc[stale, feats] = None

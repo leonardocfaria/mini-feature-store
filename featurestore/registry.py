@@ -12,6 +12,10 @@ class FeatureView:
     features: list[str]
     ttl_days: float  # a feature row older than this at lookup time is treated as missing
 
+    def __post_init__(self):  # runs on apply() and on load: names become SQL identifiers
+        if not all(n.isidentifier() for n in [self.name, self.entity, *self.features]):
+            raise ValueError("view, entity and feature names must be identifiers")
+
 
 class Registry:
     def __init__(self, path: str | Path):
@@ -21,8 +25,6 @@ class Registry:
             self.views = {v["name"]: FeatureView(**v) for v in json.loads(self.path.read_text())}
 
     def apply(self, view: FeatureView) -> None:
-        if not view.name.isidentifier() or not all(f.isidentifier() for f in [view.entity, *view.features]):
-            raise ValueError("view, entity and feature names must be identifiers")  # they become SQL identifiers
         self.views[view.name] = view
         self.path.write_text(json.dumps([asdict(v) for v in self.views.values()], indent=2))
 

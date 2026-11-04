@@ -26,6 +26,15 @@ def reg(tmp_path):
     return r
 
 
+def test_bad_names_and_tz_aware_sources_rejected(reg, tmp_path):
+    with pytest.raises(ValueError):
+        FeatureView("bad name", "user_id", "x.parquet", ["f"], ttl_days=1)
+    pd.DataFrame({"user_id": [1], "event_timestamp": [T("2024-01-01", tz="UTC")], "x": [1.0]}).to_parquet(tmp_path / "tz.parquet")
+    reg.apply(FeatureView("tz", "user_id", str(tmp_path / "tz.parquet"), ["x"], ttl_days=1))
+    with pytest.raises(ValueError, match="naive"):
+        get_historical_features(reg, pd.DataFrame({"user_id": [1], "event_timestamp": [T("2024-01-02")]}), ["tz:x"])
+
+
 def test_registry_round_trip(reg, tmp_path):
     again = Registry(tmp_path / "registry.json")
     assert again.get("user_score") == reg.get("user_score")
@@ -73,6 +82,21 @@ def test_materialize_latest_idempotent_and_forward_only(reg, tmp_path):
     assert got["user_score__score"][0] == 30.0
     later = store.get_online_features(reg, ["user_score:score"], [1], now=T("2024-01-09"))
     assert pd.isna(later["user_score__score"][0])  # expired by ttl at read time
+    assert store.get_online_features(reg, ["user_score:score"], np.array([1]), now=T("2024-01-05"))["user_score__score"][0] == 30.0
+    assert len(store.get_online_features(reg, ["user_score:score"], [], now=T("2024-01-05"))) == 0
+    # skew exactly at the TTL boundary: user 1's row is exactly 2 days old at 01-05
+    off = get_historical_features(reg, pd.DataFrame({"user_id": [1, 2], "event_timestamp": [T("2024-01-05")] * 2}), ["user_score:score"])
+    on = store.get_online_features(reg, ["user_score:score"], [1, 2], now=T("2024-01-05"))
+    assert off["user_score__score"].tolist()[0] == on["user_score__score"].tolist()[0] == 30.0
+    assert pd.isna(off["user_score__score"][1]) and pd.isna(on["user_score__score"][1])
+
+
+def test_demo_job_emits_zero_rows_not_gaps():
+    txns = pd.DataFrame({"user_id": [7, 8], "ts": [T("2024-01-01 10:00"), T("2024-01-20 10:00")], "amount": [5.0, 1.0]})
+    f = build_daily_features(txns)
+    u7 = f[f.user_id == 7].set_index("event_timestamp").txn_count_7d
+    assert u7[T("2024-01-02")] == 1 and u7[T("2024-01-09")] == 0  # explicit zero once the window is empty
+    assert u7.index.max() == T("2024-01-15")  # not scored after 14 days of inactivity
 
 
 def test_pit_join_matches_brute_force_oracle(tmp_path):
